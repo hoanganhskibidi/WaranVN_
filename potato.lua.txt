@@ -1,27 +1,40 @@
 --[[
-    Potato's Ultimate Hub – Team Check for ESP + Performance Optimized
-    Yêu cầu: Executor hỗ trợ Drawing Library
+    Potato's Ultimate Hub – FINAL EDITION
+    - Aimbot (camera/mouse, chọn aim part, FOV, smoothness, team check)
+    - Silent Aim (hooking remote, FOV riêng, miss chance, random delay, auto detect gun)
+    - Visual ESP (Box, Skeleton R6/R15, Distance, Health bar proportional, Name, Line, Player Outline)
+    - Player Mods (WalkSpeed, JumpPower, Fly, NoClip, Teleport)
+    - Rainbow color với tốc độ điều chỉnh
+    - Hotkey K để ẩn/hiện menu, logo kéo thả
+    - ESP chỉ hiển thị trong khoảng cách RENDER_DISTANCE, team check cho ESP
+    - Anti-ban: sử dụng syn.protect_gui, silent aim không đụng camera, Highlight quản lý theo tên
+    - Tối ưu: cache bounding box, thoát sớm khi không cần vẽ
+    Yêu cầu: Executor hỗ trợ Drawing Library, hook RemoteEvent, mousemoverel
 --]]
 
+-- ================== SERVICES ==================
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local Camera = workspace.CurrentCamera
 local LocalPlayer = Players.LocalPlayer
 
+-- ================== DRAWING LIBRARY ==================
 local Drawing = Drawing or (getgenv and getgenv().Drawing)
-if not Drawing then warn("Executor không hỗ trợ Drawing Library!") end
+if not Drawing then
+    warn("Executor không hỗ trợ Drawing Library! Một số tính năng sẽ không hoạt động.")
+end
 
--- Biến toàn cục
+-- ================== GLOBAL VARIABLES ==================
 local fovCircle = nil
 local colorHue = 0
 local guiHidden = false
 local logoButton = nil
 local activeDrawings = {}
 local mainFrame = nil
-
 local RENDER_DISTANCE = 500
 
+-- ================== CONFIGURATION ==================
 local config = {
     aimbot = {
         enabled = false,
@@ -31,6 +44,13 @@ local config = {
         smoothness = 0.95,
         teamCheck = false,
         aimPart = "Head"
+    },
+    silentAim = {
+        enabled = false,
+        fov = 150,
+        missChance = 10,
+        randomDelay = true,
+        autoDetectGun = true
     },
     visual = {
         enabled = false,
@@ -44,7 +64,7 @@ local config = {
         color = Color3.fromRGB(0, 255, 0),
         rainbow = false,
         rainbowSpeed = 1,
-        teamCheck = false    -- dùng chung với aimbot hoặc riêng
+        teamCheck = false
     },
     player = {
         walkspeed = 16,
@@ -57,10 +77,10 @@ local config = {
 
 local AIM_PARTS = {"Head", "Torso", "HumanoidRootPart"}
 
--- ================== HELPERS ==================
-local function worldToScreen(pos)
-    local vec, onScreen = Camera:WorldToViewportPoint(pos)
-    return Vector2.new(vec.X, vec.Y), onScreen
+-- ================== HELPER FUNCTIONS ==================
+local function worldToScreen(position)
+    local vector, onScreen = Camera:WorldToViewportPoint(position)
+    return Vector2.new(vector.X, vector.Y), onScreen
 end
 
 local function getCharacter(player)
@@ -71,66 +91,55 @@ local function getTeam(player)
     return player.Team
 end
 
--- Hàm kiểm tra team cho cả ESP và Aimbot
 local function isTeammate(player)
     return (config.aimbot.teamCheck or config.visual.teamCheck) and getTeam(player) == getTeam(LocalPlayer)
 end
 
--- Hàm kiểm tra có nên hiển thị ESP cho player không
-local function shouldShowPlayer(player)
-    if player == LocalPlayer then return false end
-    local char = getCharacter(player)
-    if not char then return false end
-    local humanoid = char:FindFirstChild("Humanoid")
-    if not humanoid or humanoid.Health <= 0 then return false end
-    local root = char:FindFirstChild("HumanoidRootPart")
-    if not root then return false end
-    local head = char:FindFirstChild("Head")
-    if not head then return false end
-    -- Kiểm tra khoảng cách
-    if (root.Position - Camera.CFrame.Position).Magnitude > RENDER_DISTANCE then return false end
-    -- Kiểm tra team (nếu bật)
-    if isTeammate(player) then return false end
-    return true
-end
-
 local function findClosestPlayerToCursor(fovRadius)
-    local closest, shortest = nil, fovRadius
-    local screenCenter = Vector2.new(Camera.ViewportSize.X/2, Camera.ViewportSize.Y/2)
-    for _, plr in ipairs(Players:GetPlayers()) do
-        if plr ~= LocalPlayer and not isTeammate(plr) then
-            local char = getCharacter(plr)
-            if char then
-                local head = char:FindFirstChild("Head") or char:FindFirstChild("Torso")
+    local closestPlayer = nil
+    local shortestDistance = fovRadius
+    local screenCenter = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+
+    for _, otherPlayer in ipairs(Players:GetPlayers()) do
+        if otherPlayer ~= LocalPlayer and not isTeammate(otherPlayer) then
+            local character = getCharacter(otherPlayer)
+            if character then
+                local head = character:FindFirstChild("Head") or character:FindFirstChild("Torso")
                 if head then
-                    local root = char:FindFirstChild("HumanoidRootPart")
-                    if root and (root.Position - Camera.CFrame.Position).Magnitude > RENDER_DISTANCE then
+                    local rootPart = character:FindFirstChild("HumanoidRootPart")
+                    if rootPart and (rootPart.Position - Camera.CFrame.Position).Magnitude > RENDER_DISTANCE then
                         continue
                     end
-                    local screenPos, onScreen = worldToScreen(head.Position)
+                    local screenPosition, onScreen = worldToScreen(head.Position)
                     if onScreen then
-                        local dist = (Vector2.new(screenPos.X, screenPos.Y) - screenCenter).Magnitude
-                        if dist < shortest then
-                            shortest = dist
-                            closest = plr
+                        local distance = (Vector2.new(screenPosition.X, screenPosition.Y) - screenCenter).Magnitude
+                        if distance < shortestDistance then
+                            shortestDistance = distance
+                            closestPlayer = otherPlayer
                         end
                     end
                 end
             end
         end
     end
-    return closest
+
+    return closestPlayer
 end
 
--- Tối ưu: cache bouding box trong 1 frame
+-- Cache for getBoundingBox to avoid recalculating every frame for the same character
 local boundingBoxCache = {}
 local function getBoundingBox(character)
-    -- Nếu đã tính trong frame này thì trả về cache
-    if boundingBoxCache[character] then return boundingBoxCache[character][1], boundingBoxCache[character][2] end
+    -- Return cached result if available
+    if boundingBoxCache[character] then
+        return boundingBoxCache[character][1], boundingBoxCache[character][2]
+    end
+
     local minX, minY, maxX, maxY
     for _, part in pairs(character:GetChildren()) do
         if part:IsA("BasePart") then
-            local cframe, size = part.CFrame, part.Size
+            local cframe = part.CFrame
+            local size = part.Size
+            -- 8 corners of the part
             local corners = {
                 cframe * Vector3.new(-size.X/2, -size.Y/2, -size.Z/2),
                 cframe * Vector3.new(-size.X/2, -size.Y/2, size.Z/2),
@@ -145,8 +154,10 @@ local function getBoundingBox(character)
                 local screenPos, onScreen = worldToScreen(corner)
                 if onScreen then
                     if not minX then
-                        minX, minY = screenPos.X, screenPos.Y
-                        maxX, maxY = screenPos.X, screenPos.Y
+                        minX = screenPos.X
+                        minY = screenPos.Y
+                        maxX = screenPos.X
+                        maxY = screenPos.Y
                     else
                         minX = math.min(minX, screenPos.X)
                         minY = math.min(minY, screenPos.Y)
@@ -157,20 +168,142 @@ local function getBoundingBox(character)
             end
         end
     end
+
     if minX then
-        local minVec = Vector2.new(minX, minY)
-        local maxVec = Vector2.new(maxX, maxY)
-        boundingBoxCache[character] = {minVec, maxVec}
-        return minVec, maxVec
+        local minVector = Vector2.new(minX, minY)
+        local maxVector = Vector2.new(maxX, maxY)
+        boundingBoxCache[character] = {minVector, maxVector}
+        return minVector, maxVector
     end
+
     boundingBoxCache[character] = {nil, nil}
     return nil, nil
 end
 
--- ================== DRAWING MANAGEMENT ==================
-local function clearAll()
-    for _, d in ipairs(activeDrawings) do
-        pcall(function() d:Remove() end)
+-- ================== SILENT AIM SYSTEM ==================
+local silentAimConnection = nil
+
+local function findClosestEnemyInFOV(fovRadius)
+    local closestEnemy = nil
+    local shortestDistance = fovRadius
+    local screenCenter = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+
+    for _, otherPlayer in ipairs(Players:GetPlayers()) do
+        if otherPlayer ~= LocalPlayer and not (config.aimbot.teamCheck and otherPlayer.Team == LocalPlayer.Team) then
+            local character = otherPlayer.Character
+            if character and character:FindFirstChild("Humanoid") and character.Humanoid.Health > 0 then
+                local head = character:FindFirstChild("Head")
+                if head then
+                    local rootPart = character:FindFirstChild("HumanoidRootPart")
+                    if rootPart and (rootPart.Position - Camera.CFrame.Position).Magnitude <= RENDER_DISTANCE then
+                        local screenPosition, onScreen = Camera:WorldToViewportPoint(head.Position)
+                        if onScreen then
+                            local distance = (Vector2.new(screenPosition.X, screenPosition.Y) - screenCenter).Magnitude
+                            if distance < shortestDistance then
+                                shortestDistance = distance
+                                closestEnemy = otherPlayer
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    return closestEnemy
+end
+
+local function getGunTool()
+    local character = LocalPlayer.Character
+    if not character then
+        return nil
+    end
+    for _, tool in ipairs(character:GetChildren()) do
+        if tool:IsA("Tool") and (tool:FindFirstChild("Handle") or tool:GetAttribute("IsGun")) then
+            return tool
+        end
+    end
+    return nil
+end
+
+function setupSilentAim()
+    -- Disconnect previous connection
+    if silentAimConnection then
+        silentAimConnection:Disconnect()
+        silentAimConnection = nil
+    end
+
+    if not config.silentAim.enabled then
+        return
+    end
+
+    local tool = getGunTool()
+    if not tool then
+        return
+    end
+
+    -- Try to find the remote event used for shooting
+    local remote = tool:FindFirstChild("RemoteEvent") or tool:FindFirstChild("ShootRemote") or tool:FindFirstChild("Fire")
+    if not remote then
+        return
+    end
+
+    -- Hook into the remote's OnServerEvent to intercept shooting
+    silentAimConnection = remote.OnServerEvent:Connect(function(player, ...)
+        if player ~= LocalPlayer then
+            return
+        end
+        -- Check if still holding a gun (if autoDetectGun is enabled)
+        if config.silentAim.autoDetectGun and not getGunTool() then
+            return
+        end
+        -- Apply random delay
+        if config.silentAim.randomDelay then
+            wait(math.random(50, 150) / 1000)
+        end
+        -- Miss chance simulation
+        if math.random(1, 100) <= config.silentAim.missChance then
+            return
+        end
+        -- Find closest enemy in silent FOV
+        local target = findClosestEnemyInFOV(config.silentAim.fov)
+        if not target or not target.Character or not target.Character:FindFirstChild("Head") then
+            return
+        end
+        local head = target.Character.Head
+
+        -- Modify the arguments: replace the first Vector3 argument (assumed to be target position) with head position
+        local args = {...}
+        if #args >= 1 and typeof(args[1]) == "Vector3" then
+            args[1] = head.Position
+            -- Fire the remote again with modified arguments
+            pcall(function()
+                remote:FireServer(unpack(args))
+            end)
+            -- Prevent the original event from being processed further
+            return nil
+        end
+    end)
+end
+
+-- Re‑setup silent aim when the local player's character changes or tools are added/removed
+LocalPlayer.CharacterAdded:Connect(function(character)
+    character.ChildAdded:Connect(function(child)
+        if config.silentAim.enabled and child:IsA("Tool") then
+            setupSilentAim()
+        end
+    end)
+    character.ChildRemoved:Connect(function(child)
+        if child:IsA("Tool") then
+            setupSilentAim()
+        end
+    end)
+end)
+
+-- ================== VISUAL ESP ==================
+local function clearAllDrawings()
+    for _, drawing in ipairs(activeDrawings) do
+        pcall(function() drawing:Remove() end)
     end
     activeDrawings = {}
 end
@@ -178,68 +311,95 @@ end
 local function clearHighlights()
     for _, player in ipairs(Players:GetPlayers()) do
         if player ~= LocalPlayer then
-            local char = getCharacter(player)
-            if char then
-                local hl = char:FindFirstChild("PotatoOutline")
-                if hl then hl:Destroy() end
+            local character = getCharacter(player)
+            if character then
+                local highlight = character:FindFirstChild("PotatoOutline")
+                if highlight then
+                    highlight:Destroy()
+                end
             end
         end
     end
 end
 
--- Vẽ ESP (đã tối ưu)
 local function drawESP()
-    -- Xóa cache bounding box đầu frame
+    -- Clear cache every frame
     boundingBoxCache = {}
-    clearAll()
+    clearAllDrawings()
+
+    -- If ESP master switch is off, also clear all highlights and return
     if not config.visual.enabled then
         clearHighlights()
         return
     end
 
-    local color = config.visual.color
+    -- Determine color
+    local currentColor = config.visual.color
     if config.visual.rainbow then
         colorHue = (colorHue + 0.005 * config.visual.rainbowSpeed) % 1
-        color = Color3.fromHSV(colorHue, 1, 1)
+        currentColor = Color3.fromHSV(colorHue, 1, 1)
     end
 
     local drawnPlayers = {}
 
     for _, player in ipairs(Players:GetPlayers()) do
-        if not shouldShowPlayer(player) then continue end
-        local char = getCharacter(player)
-        -- shouldShowPlayer đã kiểm tra char, humanoid, root, head, khoảng cách, team
-        local humanoid = char:FindFirstChild("Humanoid")
-        local head = char:FindFirstChild("Head")
-        local root = char:FindFirstChild("HumanoidRootPart")
+        -- Skip local player and teammates if teamCheck is on
+        if player == LocalPlayer or isTeammate(player) then
+            continue
+        end
+
+        local character = getCharacter(player)
+        if not character then
+            continue
+        end
+
+        local humanoid = character:FindFirstChild("Humanoid")
+        if not humanoid or humanoid.Health <= 0 then
+            continue
+        end
+
+        local head = character:FindFirstChild("Head")
+        local rootPart = character:FindFirstChild("HumanoidRootPart")
+        if not head or not rootPart then
+            continue
+        end
+
+        -- Distance check (render distance)
+        local distanceFromCamera = (rootPart.Position - Camera.CFrame.Position).Magnitude
+        if distanceFromCamera > RENDER_DISTANCE then
+            continue
+        end
 
         drawnPlayers[player] = true
 
-        local headPos, headVis = worldToScreen(head.Position)
-        local rootPos, rootVis = worldToScreen(root.Position)
+        local headScreenPos, headVisible = worldToScreen(head.Position)
+        local rootScreenPos, rootVisible = worldToScreen(rootPart.Position)
 
-        -- Nếu không nhìn thấy head và root thì bỏ qua (tiết kiệm)
-        if not headVis and not rootVis then continue end
+        -- Stop drawing if neither head nor root is on screen (performance)
+        if not headVisible and not rootVisible then
+            continue
+        end
 
-        -- Box (chỉ cần 1 trong 2 visible)
-        if config.visual.box and (headVis or rootVis) then
-            local min, max = getBoundingBox(char)
-            if min and max then
+        ---- BOX ----
+        if config.visual.box then
+            local minVector, maxVector = getBoundingBox(character)
+            if minVector and maxVector then
                 local box = Drawing.new("Square")
                 box.Thickness = 2
                 box.Filled = false
-                box.Color = color
-                box.Size = Vector2.new(max.X - min.X, max.Y - min.Y)
-                box.Position = min
+                box.Color = currentColor
+                box.Size = Vector2.new(maxVector.X - minVector.X, maxVector.Y - minVector.Y)
+                box.Position = minVector
                 box.Visible = true
                 table.insert(activeDrawings, box)
             end
         end
 
-        -- Skeleton (cần headVis)
-        if config.visual.skeleton and headVis then
+        ---- SKELETON (R15 and R6) ----
+        if config.visual.skeleton and headVisible then
             local connections = {}
-            if char:FindFirstChild("UpperTorso") then
+            if character:FindFirstChild("UpperTorso") then
+                -- R15 rig
                 connections = {
                     {"Head", "UpperTorso"}, {"UpperTorso", "LowerTorso"},
                     {"UpperTorso", "LeftUpperArm"}, {"LeftUpperArm", "LeftLowerArm"}, {"LeftLowerArm", "LeftHand"},
@@ -247,7 +407,8 @@ local function drawESP()
                     {"LowerTorso", "LeftUpperLeg"}, {"LeftUpperLeg", "LeftLowerLeg"}, {"LeftLowerLeg", "LeftFoot"},
                     {"LowerTorso", "RightUpperLeg"}, {"RightUpperLeg", "RightLowerLeg"}, {"RightLowerLeg", "RightFoot"}
                 }
-            elseif char:FindFirstChild("Torso") then
+            elseif character:FindFirstChild("Torso") then
+                -- R6 rig
                 connections = {
                     {"Head", "Torso"},
                     {"Torso", "Left Arm"}, {"Left Arm", "LeftHand"},
@@ -256,18 +417,18 @@ local function drawESP()
                     {"Torso", "Right Leg"}, {"Right Leg", "RightFoot"}
                 }
             end
-            for _, conn in ipairs(connections) do
-                local a = char:FindFirstChild(conn[1])
-                local b = char:FindFirstChild(conn[2])
-                if a and b then
-                    local pA, vA = worldToScreen(a.Position)
-                    local pB, vB = worldToScreen(b.Position)
-                    if vA and vB then
+            for _, connection in ipairs(connections) do
+                local partA = character:FindFirstChild(connection[1])
+                local partB = character:FindFirstChild(connection[2])
+                if partA and partB then
+                    local screenPosA, visibleA = worldToScreen(partA.Position)
+                    local screenPosB, visibleB = worldToScreen(partB.Position)
+                    if visibleA and visibleB then
                         local line = Drawing.new("Line")
                         line.Thickness = 1
-                        line.Color = color
-                        line.From = pA
-                        line.To = pB
+                        line.Color = currentColor
+                        line.From = screenPosA
+                        line.To = screenPosB
                         line.Visible = true
                         table.insert(activeDrawings, line)
                     end
@@ -275,215 +436,238 @@ local function drawESP()
             end
         end
 
-        -- Distance (cần headVis)
-        if config.visual.distance and headVis then
-            local dist = (root.Position - Camera.CFrame.Position).Magnitude
-            local text = Drawing.new("Text")
-            text.Text = string.format("%.0f studs", dist)
-            text.Size = 12
-            text.Color = color
-            text.Position = Vector2.new(headPos.X, headPos.Y - 25)
-            text.Center = true
-            text.Visible = true
-            table.insert(activeDrawings, text)
+        ---- DISTANCE ----
+        if config.visual.distance and headVisible then
+            local distanceText = Drawing.new("Text")
+            distanceText.Text = string.format("%.0f studs", distanceFromCamera)
+            distanceText.Size = 12
+            distanceText.Color = currentColor
+            distanceText.Position = Vector2.new(headScreenPos.X, headScreenPos.Y - 25)
+            distanceText.Center = true
+            distanceText.Visible = true
+            table.insert(activeDrawings, distanceText)
         end
 
-        -- Health (cần headVis và bounding box)
-        if config.visual.health and headVis then
-            local min, max = getBoundingBox(char)
-            if min and max then
-                local height = max.Y - min.Y
+        ---- HEALTH BAR (proportional to character height) ----
+        if config.visual.health and headVisible then
+            local minVector, maxVector = getBoundingBox(character)
+            if minVector and maxVector then
+                local fullHeight = maxVector.Y - minVector.Y
                 local healthPercent = humanoid.Health / humanoid.MaxHealth
                 local barWidth = 3
-                local barX = max.X + 5
+                local barX = maxVector.X + 5
 
-                local outline = Drawing.new("Square")
-                outline.Filled = false
-                outline.Thickness = 1
-                outline.Color = Color3.new(0,0,0)
-                outline.Size = Vector2.new(barWidth, height)
-                outline.Position = Vector2.new(barX, min.Y)
-                outline.Visible = true
-                table.insert(activeDrawings, outline)
+                -- Outline (black border)
+                local healthOutline = Drawing.new("Square")
+                healthOutline.Filled = false
+                healthOutline.Thickness = 1
+                healthOutline.Color = Color3.new(0, 0, 0)
+                healthOutline.Size = Vector2.new(barWidth, fullHeight)
+                healthOutline.Position = Vector2.new(barX, minVector.Y)
+                healthOutline.Visible = true
+                table.insert(activeDrawings, healthOutline)
 
-                local barHeight = height * healthPercent
-                local bar = Drawing.new("Square")
-                bar.Filled = true
-                bar.Color = Color3.fromRGB(0,255,0)
-                bar.Size = Vector2.new(barWidth, barHeight)
-                bar.Position = Vector2.new(barX, min.Y)
-                bar.Visible = true
-                table.insert(activeDrawings, bar)
+                -- Filled bar (green)
+                local barHeight = fullHeight * healthPercent
+                local healthBar = Drawing.new("Square")
+                healthBar.Filled = true
+                healthBar.Color = Color3.fromRGB(0, 255, 0)
+                healthBar.Size = Vector2.new(barWidth, barHeight)
+                healthBar.Position = Vector2.new(barX, minVector.Y)
+                healthBar.Visible = true
+                table.insert(activeDrawings, healthBar)
             end
         end
 
-        -- Name (cần headVis)
-        if config.visual.name and headVis then
-            local text = Drawing.new("Text")
-            text.Text = player.Name
-            text.Size = 13
-            text.Color = color
-            text.Position = Vector2.new(headPos.X, headPos.Y + 20)
-            text.Center = true
-            text.Visible = true
-            table.insert(activeDrawings, text)
+        ---- NAME ----
+        if config.visual.name and headVisible then
+            local nameText = Drawing.new("Text")
+            nameText.Text = player.Name
+            nameText.Size = 13
+            nameText.Color = currentColor
+            nameText.Position = Vector2.new(headScreenPos.X, headScreenPos.Y + 20)
+            nameText.Center = true
+            nameText.Visible = true
+            table.insert(activeDrawings, nameText)
         end
 
-        -- Line (cần headVis)
-        if config.visual.line and headVis then
-            local topCenter = Vector2.new(Camera.ViewportSize.X/2, 0)
-            local line = Drawing.new("Line")
-            line.Thickness = 1
-            line.Color = color
-            line.From = topCenter
-            line.To = headPos
-            line.Visible = true
-            table.insert(activeDrawings, line)
+        ---- LINE (tracer from top center to head) ----
+        if config.visual.line and headVisible then
+            local topCenter = Vector2.new(Camera.ViewportSize.X / 2, 0)
+            local tracerLine = Drawing.new("Line")
+            tracerLine.Thickness = 1
+            tracerLine.Color = currentColor
+            tracerLine.From = topCenter
+            tracerLine.To = headScreenPos
+            tracerLine.Visible = true
+            table.insert(activeDrawings, tracerLine)
         end
 
-        -- Player Outline (không cần headVis)
+        ---- PLAYER OUTLINE (Highlight) ----
         if config.visual.playerOutline then
-            local existing = char:FindFirstChild("PotatoOutline")
-            if not existing then
-                local hl = Instance.new("Highlight")
-                hl.Name = "PotatoOutline"
-                hl.FillTransparency = 1
-                hl.Parent = char
-                existing = hl
+            local existingHighlight = character:FindFirstChild("PotatoOutline")
+            if not existingHighlight then
+                local newHighlight = Instance.new("Highlight")
+                newHighlight.Name = "PotatoOutline"
+                newHighlight.FillTransparency = 1
+                newHighlight.Parent = character
+                existingHighlight = newHighlight
             end
-            existing.OutlineColor = color
+            existingHighlight.OutlineColor = currentColor
         end
     end
 
-    -- Xóa highlight của những player không nằm trong tầm ESP
+    -- Remove highlights for players not drawn (out of range, dead, or not meeting conditions)
     for _, player in ipairs(Players:GetPlayers()) do
         if player ~= LocalPlayer and not drawnPlayers[player] then
-            local char = getCharacter(player)
-            if char then
-                local hl = char:FindFirstChild("PotatoOutline")
-                if hl then hl:Destroy() end
+            local character = getCharacter(player)
+            if character then
+                local highlight = character:FindFirstChild("PotatoOutline")
+                if highlight then
+                    highlight:Destroy()
+                end
             end
         end
     end
 end
 
--- ================== UI ==================
+-- ================== USER INTERFACE ==================
 local function createUI()
-    local gui = Instance.new("ScreenGui")
-    gui.Name = "PotatoHub"
-    gui.ResetOnSpawn = false
-    gui.DisplayOrder = 99
-    if syn and syn.protect_gui then syn.protect_gui(gui) end
-    gui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+    -- Main ScreenGui
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "PotatoHub"
+    screenGui.ResetOnSpawn = false
+    screenGui.DisplayOrder = 99
+    if syn and syn.protect_gui then
+        syn.protect_gui(screenGui)
+    end
+    screenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
 
-    local main = Instance.new("Frame")
-    main.Size = UDim2.new(0, 500, 0, 470)
-    main.Position = UDim2.new(0.5, -250, 0.5, -235)
-    main.BackgroundColor3 = Color3.fromRGB(20, 20, 30)
-    main.BackgroundTransparency = 0.2
-    main.BorderSizePixel = 0
-    main.Parent = gui
-    mainFrame = main
-    Instance.new("UICorner", main).CornerRadius = UDim.new(0, 12)
+    -- Main window
+    local mainWindow = Instance.new("Frame")
+    mainWindow.Size = UDim2.new(0, 500, 0, 520)
+    mainWindow.Position = UDim2.new(0.5, -250, 0.5, -260)
+    mainWindow.BackgroundColor3 = Color3.fromRGB(20, 20, 30)
+    mainWindow.BackgroundTransparency = 0.2
+    mainWindow.BorderSizePixel = 0
+    mainWindow.Parent = screenGui
+    mainFrame = mainWindow
+    Instance.new("UICorner", mainWindow).CornerRadius = UDim.new(0, 12)
 
+    -- Title bar
     local titleBar = Instance.new("Frame")
     titleBar.Size = UDim2.new(1, 0, 0, 40)
     titleBar.BackgroundColor3 = Color3.fromRGB(40, 40, 55)
     titleBar.BorderSizePixel = 0
-    titleBar.Parent = main
+    titleBar.Parent = mainWindow
     Instance.new("UICorner", titleBar).CornerRadius = UDim.new(0, 12)
 
-    local title = Instance.new("TextLabel")
-    title.Size = UDim2.new(1, -60, 1, 0)
-    title.Position = UDim2.new(0, 10, 0, 0)
-    title.BackgroundTransparency = 1
-    title.Text = "🥔 POTATO HUB"
-    title.TextColor3 = Color3.fromRGB(0, 255, 100)
-    title.Font = Enum.Font.GothamBold
-    title.TextSize = 18
-    title.Parent = titleBar
+    local titleLabel = Instance.new("TextLabel")
+    titleLabel.Size = UDim2.new(1, -60, 1, 0)
+    titleLabel.Position = UDim2.new(0, 10, 0, 0)
+    titleLabel.BackgroundTransparency = 1
+    titleLabel.Text = "🥔 POTATO HUB"
+    titleLabel.TextColor3 = Color3.fromRGB(0, 255, 100)
+    titleLabel.Font = Enum.Font.GothamBold
+    titleLabel.TextSize = 18
+    titleLabel.Parent = titleBar
 
-    local minimizeBtn = Instance.new("TextButton")
-    minimizeBtn.Size = UDim2.new(0, 30, 0, 30)
-    minimizeBtn.Position = UDim2.new(1, -35, 0, 5)
-    minimizeBtn.BackgroundColor3 = Color3.fromRGB(80, 80, 100)
-    minimizeBtn.BorderSizePixel = 0
-    minimizeBtn.Text = "—"
-    minimizeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-    minimizeBtn.Font = Enum.Font.GothamBold
-    minimizeBtn.TextSize = 18
-    minimizeBtn.Parent = titleBar
-    Instance.new("UICorner", minimizeBtn).CornerRadius = UDim.new(0, 6)
+    -- Minimize button
+    local minimizeButton = Instance.new("TextButton")
+    minimizeButton.Size = UDim2.new(0, 30, 0, 30)
+    minimizeButton.Position = UDim2.new(1, -35, 0, 5)
+    minimizeButton.BackgroundColor3 = Color3.fromRGB(80, 80, 100)
+    minimizeButton.BorderSizePixel = 0
+    minimizeButton.Text = "—"
+    minimizeButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    minimizeButton.Font = Enum.Font.GothamBold
+    minimizeButton.TextSize = 18
+    minimizeButton.Parent = titleBar
+    Instance.new("UICorner", minimizeButton).CornerRadius = UDim.new(0, 6)
 
-    minimizeBtn.MouseButton1Click:Connect(function()
+    minimizeButton.MouseButton1Click:Connect(function()
         guiHidden = true
-        main.Visible = false
+        mainWindow.Visible = false
         if not logoButton then
-            createLogoButton(gui, main)
+            createLogoButton(screenGui, mainWindow)
         end
     end)
 
-    local dragging, dragStart, startPos
+    -- Dragging functionality for title bar
+    local dragging = false
+    local dragStartPosition = nil
+    local startPosition = nil
+
     titleBar.InputBegan:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 then
             dragging = true
-            dragStart = input.Position
-            startPos = main.Position
+            dragStartPosition = input.Position
+            startPosition = mainWindow.Position
             input.Changed:Connect(function()
-                if input.UserInputState == Enum.UserInputState.End then dragging = false end
+                if input.UserInputState == Enum.UserInputState.End then
+                    dragging = false
+                end
             end)
         end
     end)
+
     titleBar.InputChanged:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseMovement and dragging then
-            local delta = input.Position - dragStart
-            main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+            local delta = input.Position - dragStartPosition
+            mainWindow.Position = UDim2.new(
+                startPosition.X.Scale, startPosition.X.Offset + delta.X,
+                startPosition.Y.Scale, startPosition.Y.Offset + delta.Y
+            )
         end
     end)
 
+    -- Tab bar
     local tabBar = Instance.new("Frame")
     tabBar.Size = UDim2.new(0, 120, 1, -40)
     tabBar.Position = UDim2.new(0, 0, 0, 40)
     tabBar.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
     tabBar.BorderSizePixel = 0
-    tabBar.Parent = main
+    tabBar.Parent = mainWindow
 
-    local tabs = {"Aimbot", "Visual", "Player"}
+    local tabs = {"Aimbot", "Silent", "Visual", "Player"}
     local activeTab = "Aimbot"
     local pages = {}
 
     for i, tabName in ipairs(tabs) do
-        local btn = Instance.new("TextButton")
-        btn.Size = UDim2.new(1, -10, 0, 40)
-        btn.Position = UDim2.new(0, 5, 0, 10 + (i-1)*45)
-        btn.BackgroundColor3 = Color3.fromRGB(50, 50, 65)
-        btn.Text = tabName
-        btn.TextColor3 = Color3.fromRGB(255, 255, 255)
-        btn.Font = Enum.Font.GothamSemibold
-        btn.TextSize = 14
-        btn.Parent = tabBar
-        Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
+        local tabButton = Instance.new("TextButton")
+        tabButton.Size = UDim2.new(1, -10, 0, 40)
+        tabButton.Position = UDim2.new(0, 5, 0, 10 + (i - 1) * 45)
+        tabButton.BackgroundColor3 = Color3.fromRGB(50, 50, 65)
+        tabButton.Text = tabName
+        tabButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+        tabButton.Font = Enum.Font.GothamSemibold
+        tabButton.TextSize = 14
+        tabButton.Parent = tabBar
+        Instance.new("UICorner", tabButton).CornerRadius = UDim.new(0, 6)
 
         local page = Instance.new("Frame")
         page.Size = UDim2.new(1, -130, 1, -40)
         page.Position = UDim2.new(0, 130, 0, 40)
         page.BackgroundColor3 = Color3.fromRGB(25, 25, 35)
         page.Visible = (tabName == activeTab)
-        page.Parent = main
+        page.Parent = mainWindow
         pages[tabName] = page
 
-        btn.MouseButton1Click:Connect(function()
+        tabButton.MouseButton1Click:Connect(function()
             for _, pg in pairs(pages) do pg.Visible = false end
             page.Visible = true
             activeTab = tabName
-            for _, b in ipairs(tabBar:GetChildren()) do
-                if b:IsA("TextButton") then b.BackgroundColor3 = Color3.fromRGB(50, 50, 65) end
+            for _, btn in ipairs(tabBar:GetChildren()) do
+                if btn:IsA("TextButton") then
+                    btn.BackgroundColor3 = Color3.fromRGB(50, 50, 65)
+                end
             end
-            btn.BackgroundColor3 = Color3.fromRGB(0, 180, 80)
+            tabButton.BackgroundColor3 = Color3.fromRGB(0, 180, 80)
         end)
     end
 
-    local function createSlider(parent, text, min, max, default, callback)
+    -- Helper functions for UI elements
+    local function createSlider(parent, labelText, minValue, maxValue, defaultValue, callback)
         local yOffset = #parent:GetChildren() * 35 + 10
         local frame = Instance.new("Frame")
         frame.Size = UDim2.new(1, -20, 0, 50)
@@ -492,7 +676,7 @@ local function createUI()
         frame.Parent = parent
 
         local label = Instance.new("TextLabel")
-        label.Text = text
+        label.Text = labelText
         label.Size = UDim2.new(1, 0, 0, 20)
         label.TextColor3 = Color3.fromRGB(255, 255, 255)
         label.Font = Enum.Font.Gotham
@@ -509,7 +693,7 @@ local function createUI()
         Instance.new("UICorner", sliderFrame).CornerRadius = UDim.new(0, 4)
 
         local fill = Instance.new("Frame")
-        fill.Size = UDim2.new((default - min) / (max - min), 0, 1, 0)
+        fill.Size = UDim2.new((defaultValue - minValue) / (maxValue - minValue), 0, 1, 0)
         fill.BackgroundColor3 = Color3.fromRGB(0, 200, 100)
         fill.BorderSizePixel = 0
         fill.Parent = sliderFrame
@@ -518,7 +702,7 @@ local function createUI()
         textBox.Size = UDim2.new(0.2, 0, 0, 20)
         textBox.Position = UDim2.new(0.78, 0, 0, 22)
         textBox.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
-        textBox.Text = tostring(default)
+        textBox.Text = tostring(defaultValue)
         textBox.TextColor3 = Color3.fromRGB(255, 255, 255)
         textBox.Font = Enum.Font.Gotham
         textBox.TextSize = 12
@@ -542,7 +726,7 @@ local function createUI()
                 local absPos = sliderFrame.AbsolutePosition
                 local absSize = sliderFrame.AbsoluteSize
                 local relX = math.clamp((mousePos.X - absPos.X) / absSize.X, 0, 1)
-                local value = min + relX * (max - min)
+                local value = minValue + relX * (maxValue - minValue)
                 value = math.floor(value * 100) / 100
                 textBox.Text = tostring(value)
                 fill.Size = UDim2.new(relX, 0, 1, 0)
@@ -551,12 +735,12 @@ local function createUI()
         end)
         textBox.FocusLost:Connect(function()
             local num = tonumber(textBox.Text)
-            if num and num >= min and num <= max then
-                local relX = (num - min) / (max - min)
+            if num and num >= minValue and num <= maxValue then
+                local relX = (num - minValue) / (maxValue - minValue)
                 fill.Size = UDim2.new(relX, 0, 1, 0)
                 callback(num)
             else
-                textBox.Text = tostring(default)
+                textBox.Text = tostring(defaultValue)
             end
         end)
     end
@@ -578,29 +762,30 @@ local function createUI()
         label.BackgroundTransparency = 1
         label.Parent = frame
 
-        local btn = Instance.new("TextButton")
-        btn.Size = UDim2.new(0, 50, 0, 25)
-        btn.Position = UDim2.new(0.75, 0, 0.5, -12.5)
-        btn.BackgroundColor3 = Color3.fromRGB(100, 100, 100)
-        btn.Text = "OFF"
-        btn.TextColor3 = Color3.fromRGB(255, 255, 255)
-        btn.Font = Enum.Font.GothamBold
-        btn.TextSize = 12
-        btn.Parent = frame
-        Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 4)
+        local button = Instance.new("TextButton")
+        button.Size = UDim2.new(0, 50, 0, 25)
+        button.Position = UDim2.new(0.75, 0, 0.5, -12.5)
+        button.BackgroundColor3 = Color3.fromRGB(100, 100, 100)
+        button.Text = "OFF"
+        button.TextColor3 = Color3.fromRGB(255, 255, 255)
+        button.Font = Enum.Font.GothamBold
+        button.TextSize = 12
+        button.Parent = frame
+        Instance.new("UICorner", button).CornerRadius = UDim.new(0, 4)
 
         local state = false
-        btn.MouseButton1Click:Connect(function()
+        button.MouseButton1Click:Connect(function()
             state = not state
-            btn.Text = state and "ON" or "OFF"
-            btn.BackgroundColor3 = state and Color3.fromRGB(0, 200, 100) or Color3.fromRGB(100, 100, 100)
+            button.Text = state and "ON" or "OFF"
+            button.BackgroundColor3 = state and Color3.fromRGB(0, 200, 100) or Color3.fromRGB(100, 100, 100)
             callback(state)
         end)
+
         return {
             setState = function(newState)
                 state = newState
-                btn.Text = state and "ON" or "OFF"
-                btn.BackgroundColor3 = state and Color3.fromRGB(0, 200, 100) or Color3.fromRGB(100, 100, 100)
+                button.Text = state and "ON" or "OFF"
+                button.BackgroundColor3 = state and Color3.fromRGB(0, 200, 100) or Color3.fromRGB(100, 100, 100)
                 callback(state)
             end
         }
@@ -624,57 +809,68 @@ local function createUI()
         label.Parent = frame
 
         local currentIndex = 1
-        local btn = Instance.new("TextButton")
-        btn.Size = UDim2.new(0, 120, 0, 25)
-        btn.Position = UDim2.new(0.45, 0, 0.5, -12.5)
-        btn.BackgroundColor3 = Color3.fromRGB(70, 70, 90)
-        btn.Text = AIM_PARTS[currentIndex]
-        btn.TextColor3 = Color3.fromRGB(255, 255, 255)
-        btn.Font = Enum.Font.GothamBold
-        btn.TextSize = 12
-        btn.Parent = frame
-        Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 4)
+        local selectorButton = Instance.new("TextButton")
+        selectorButton.Size = UDim2.new(0, 120, 0, 25)
+        selectorButton.Position = UDim2.new(0.45, 0, 0.5, -12.5)
+        selectorButton.BackgroundColor3 = Color3.fromRGB(70, 70, 90)
+        selectorButton.Text = AIM_PARTS[currentIndex]
+        selectorButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+        selectorButton.Font = Enum.Font.GothamBold
+        selectorButton.TextSize = 12
+        selectorButton.Parent = frame
+        Instance.new("UICorner", selectorButton).CornerRadius = UDim.new(0, 4)
 
-        btn.MouseButton1Click:Connect(function()
+        selectorButton.MouseButton1Click:Connect(function()
             currentIndex = currentIndex % #AIM_PARTS + 1
-            btn.Text = AIM_PARTS[currentIndex]
+            selectorButton.Text = AIM_PARTS[currentIndex]
             config.aimbot.aimPart = AIM_PARTS[currentIndex]
         end)
+
         config.aimbot.aimPart = AIM_PARTS[currentIndex]
     end
 
-    -- ========== AIMBOT PAGE ==========
-    local aimPage = pages["Aimbot"]
-    createToggle(aimPage, "Enable Aimbot", function(v) config.aimbot.enabled = v end)
-    createToggle(aimPage, "Mouse Aim", function(v) config.aimbot.mouseAim = v end)
-    createSlider(aimPage, "Mouse Smoothness", 0.1, 20, config.aimbot.mouseAimSmoothness, function(v) config.aimbot.mouseAimSmoothness = v end)
-    createAimPartSelector(aimPage)
-    createSlider(aimPage, "FOV Radius", 30, 500, config.aimbot.fov, function(v) config.aimbot.fov = v end)
-    createSlider(aimPage, "Smoothness", 0.1, 1, config.aimbot.smoothness, function(v) config.aimbot.smoothness = v end)
-    createToggle(aimPage, "Team Check", function(v)
-        config.aimbot.teamCheck = v
-        config.visual.teamCheck = v   -- đồng bộ
-    end)
+    -- ========== POPULATE TABS ==========
+    -- Aimbot tab
+    createToggle(pages["Aimbot"], "Enable Aimbot", function(value) config.aimbot.enabled = value end)
+    createToggle(pages["Aimbot"], "Mouse Aim", function(value) config.aimbot.mouseAim = value end)
+    createSlider(pages["Aimbot"], "Mouse Smoothness", 0.1, 20, config.aimbot.mouseAimSmoothness, function(value) config.aimbot.mouseAimSmoothness = value end)
+    createAimPartSelector(pages["Aimbot"])
+    createSlider(pages["Aimbot"], "FOV Radius", 30, 500, config.aimbot.fov, function(value) config.aimbot.fov = value end)
+    createSlider(pages["Aimbot"], "Smoothness", 0.1, 1, config.aimbot.smoothness, function(value) config.aimbot.smoothness = value end)
+    createToggle(pages["Aimbot"], "Team Check", function(value) config.aimbot.teamCheck = value; config.visual.teamCheck = value end)
 
-    -- ========== VISUAL PAGE ==========
-    local visualPage = pages["Visual"]
-    createToggle(visualPage, "Enable ESP", function(v) config.visual.enabled = v end)
-    createToggle(visualPage, "Box", function(v) config.visual.box = v end)
-    createToggle(visualPage, "Skeleton", function(v) config.visual.skeleton = v end)
-    createToggle(visualPage, "Distance", function(v) config.visual.distance = v end)
-    createToggle(visualPage, "Health", function(v) config.visual.health = v end)
-    createToggle(visualPage, "Name", function(v) config.visual.name = v end)
-    createToggle(visualPage, "Line", function(v) config.visual.line = v end)
-    createToggle(visualPage, "Player Outline", function(v) config.visual.playerOutline = v end)
-    createToggle(visualPage, "Rainbow", function(v) config.visual.rainbow = v end)
-    createSlider(visualPage, "Rainbow Speed", 0.5, 5, config.visual.rainbowSpeed, function(v) config.visual.rainbowSpeed = v end)
+    -- Silent tab
+    createToggle(pages["Silent"], "Enable Silent Aim", function(value)
+        config.silentAim.enabled = value
+        if value then
+            setupSilentAim()
+        else
+            if silentAimConnection then silentAimConnection:Disconnect(); silentAimConnection = nil end
+        end
+    end)
+    createSlider(pages["Silent"], "Silent FOV", 30, 500, config.silentAim.fov, function(value) config.silentAim.fov = value end)
+    createSlider(pages["Silent"], "Miss Chance %", 0, 100, config.silentAim.missChance, function(value) config.silentAim.missChance = value end)
+    createToggle(pages["Silent"], "Random Delay", function(value) config.silentAim.randomDelay = value end)
+    createToggle(pages["Silent"], "Auto Detect Gun", function(value) config.silentAim.autoDetectGun = value end)
+
+    -- Visual tab
+    createToggle(pages["Visual"], "Enable ESP", function(value) config.visual.enabled = value end)
+    createToggle(pages["Visual"], "Box", function(value) config.visual.box = value end)
+    createToggle(pages["Visual"], "Skeleton", function(value) config.visual.skeleton = value end)
+    createToggle(pages["Visual"], "Distance", function(value) config.visual.distance = value end)
+    createToggle(pages["Visual"], "Health", function(value) config.visual.health = value end)
+    createToggle(pages["Visual"], "Name", function(value) config.visual.name = value end)
+    createToggle(pages["Visual"], "Line", function(value) config.visual.line = value end)
+    createToggle(pages["Visual"], "Player Outline", function(value) config.visual.playerOutline = value end)
+    createToggle(pages["Visual"], "Rainbow", function(value) config.visual.rainbow = value end)
+    createSlider(pages["Visual"], "Rainbow Speed", 0.5, 5, config.visual.rainbowSpeed, function(value) config.visual.rainbowSpeed = value end)
 
     -- Color picker
     local colorFrame = Instance.new("Frame")
     colorFrame.Size = UDim2.new(1, -20, 0, 60)
-    colorFrame.Position = UDim2.new(0, 10, 0, #visualPage:GetChildren() * 35 + 10)
+    colorFrame.Position = UDim2.new(0, 10, 0, #pages["Visual"]:GetChildren() * 35 + 10)
     colorFrame.BackgroundTransparency = 1
-    colorFrame.Parent = visualPage
+    colorFrame.Parent = pages["Visual"]
     local colorLabel = Instance.new("TextLabel")
     colorLabel.Text = "Static Color:"
     colorLabel.Size = UDim2.new(0.3, 0, 0, 20)
@@ -683,92 +879,86 @@ local function createUI()
     colorLabel.TextSize = 12
     colorLabel.BackgroundTransparency = 1
     colorLabel.Parent = colorFrame
-    local colors = {
-        Color3.fromRGB(255,0,0), Color3.fromRGB(0,255,0), Color3.fromRGB(0,100,255),
-        Color3.fromRGB(255,255,0), Color3.fromRGB(255,255,255), Color3.fromRGB(255,0,255)
+    local presetColors = {
+        Color3.fromRGB(255, 0, 0), Color3.fromRGB(0, 255, 0), Color3.fromRGB(0, 100, 255),
+        Color3.fromRGB(255, 255, 0), Color3.fromRGB(255, 255, 255), Color3.fromRGB(255, 0, 255)
     }
-    for i, c in ipairs(colors) do
-        local btn = Instance.new("TextButton")
-        btn.Size = UDim2.new(0, 20, 0, 20)
-        btn.Position = UDim2.new(0.35 + (i-1)*0.07, 0, 0, 25)
-        btn.BackgroundColor3 = c
-        btn.BorderSizePixel = 0
-        btn.Text = ""
-        btn.Parent = colorFrame
-        Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 10)
-        btn.MouseButton1Click:Connect(function()
-            config.visual.color = c
+    for i, col in ipairs(presetColors) do
+        local colorButton = Instance.new("TextButton")
+        colorButton.Size = UDim2.new(0, 20, 0, 20)
+        colorButton.Position = UDim2.new(0.35 + (i - 1) * 0.07, 0, 0, 25)
+        colorButton.BackgroundColor3 = col
+        colorButton.BorderSizePixel = 0
+        colorButton.Text = ""
+        colorButton.Parent = colorFrame
+        Instance.new("UICorner", colorButton).CornerRadius = UDim.new(0, 10)
+        colorButton.MouseButton1Click:Connect(function()
+            config.visual.color = col
             config.visual.rainbow = false
         end)
     end
 
-    -- ========== PLAYER PAGE ==========
-    local playerPage = pages["Player"]
-    createSlider(playerPage, "WalkSpeed", 16, 200, config.player.walkspeed, function(v)
-        config.player.walkspeed = v
+    -- Player tab
+    createSlider(pages["Player"], "WalkSpeed", 16, 200, config.player.walkspeed, function(value)
+        config.player.walkspeed = value
         if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
-            LocalPlayer.Character.Humanoid.WalkSpeed = v
+            LocalPlayer.Character.Humanoid.WalkSpeed = value
         end
     end)
-    createSlider(playerPage, "JumpPower", 50, 300, config.player.jumppower, function(v)
-        config.player.jumppower = v
+    createSlider(pages["Player"], "JumpPower", 50, 300, config.player.jumppower, function(value)
+        config.player.jumppower = value
         if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
-            LocalPlayer.Character.Humanoid.JumpPower = v
+            LocalPlayer.Character.Humanoid.JumpPower = value
         end
     end)
-    createToggle(playerPage, "Fly", function(v)
-        config.player.fly = v
-        if v then startFly() else stopFly() end
-    end)
-    createSlider(playerPage, "Fly Speed", 20, 200, config.player.flySpeed, function(v) config.player.flySpeed = v end)
-    createToggle(playerPage, "No Clip", function(v)
-        config.player.noclip = v
-        if v then startNoclip() else stopNoclip() end
-    end)
+    createToggle(pages["Player"], "Fly", function(value) config.player.fly = value; if value then startFly() else stopFly() end end)
+    createSlider(pages["Player"], "Fly Speed", 20, 200, config.player.flySpeed, function(value) config.player.flySpeed = value end)
+    createToggle(pages["Player"], "No Clip", function(value) config.player.noclip = value; if value then startNoclip() else stopNoclip() end end)
 
     -- Teleport
-    local teleFrame = Instance.new("Frame")
-    teleFrame.Size = UDim2.new(1, -20, 0, 70)
-    teleFrame.Position = UDim2.new(0, 10, 0, #playerPage:GetChildren() * 35 + 10)
-    teleFrame.BackgroundTransparency = 1
-    teleFrame.Parent = playerPage
-    local teleLabel = Instance.new("TextLabel")
-    teleLabel.Text = "Teleport to Player:"
-    teleLabel.Size = UDim2.new(1, 0, 0, 20)
-    teleLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-    teleLabel.Font = Enum.Font.Gotham
-    teleLabel.TextSize = 12
-    teleLabel.BackgroundTransparency = 1
-    teleLabel.Parent = teleFrame
-    local teleBox = Instance.new("TextBox")
-    teleBox.Size = UDim2.new(0.7, 0, 0, 25)
-    teleBox.Position = UDim2.new(0, 0, 0, 22)
-    teleBox.BackgroundColor3 = Color3.fromRGB(60,60,70)
-    teleBox.Text = ""
-    teleBox.PlaceholderText = "Enter name..."
-    teleBox.TextColor3 = Color3.fromRGB(255,255,255)
-    teleBox.Font = Enum.Font.Gotham
-    teleBox.TextSize = 12
-    teleBox.Parent = teleFrame
-    Instance.new("UICorner", teleBox).CornerRadius = UDim.new(0, 4)
-    local teleBtn = Instance.new("TextButton")
-    teleBtn.Size = UDim2.new(0, 60, 0, 25)
-    teleBtn.Position = UDim2.new(0.75, 0, 0, 22)
-    teleBtn.BackgroundColor3 = Color3.fromRGB(0, 180, 80)
-    teleBtn.Text = "Go"
-    teleBtn.TextColor3 = Color3.fromRGB(255,255,255)
-    teleBtn.Font = Enum.Font.GothamBold
-    teleBtn.TextSize = 12
-    teleBtn.Parent = teleFrame
-    Instance.new("UICorner", teleBtn).CornerRadius = UDim.new(0, 4)
-    teleBtn.MouseButton1Click:Connect(function()
-        local targetName = teleBox.Text
+    local teleportFrame = Instance.new("Frame")
+    teleportFrame.Size = UDim2.new(1, -20, 0, 70)
+    teleportFrame.Position = UDim2.new(0, 10, 0, #pages["Player"]:GetChildren() * 35 + 10)
+    teleportFrame.BackgroundTransparency = 1
+    teleportFrame.Parent = pages["Player"]
+    local teleportLabel = Instance.new("TextLabel")
+    teleportLabel.Text = "Teleport to Player:"
+    teleportLabel.Size = UDim2.new(1, 0, 0, 20)
+    teleportLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+    teleportLabel.Font = Enum.Font.Gotham
+    teleportLabel.TextSize = 12
+    teleportLabel.BackgroundTransparency = 1
+    teleportLabel.Parent = teleportFrame
+    local teleportInput = Instance.new("TextBox")
+    teleportInput.Size = UDim2.new(0.7, 0, 0, 25)
+    teleportInput.Position = UDim2.new(0, 0, 0, 22)
+    teleportInput.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
+    teleportInput.Text = ""
+    teleportInput.PlaceholderText = "Enter name..."
+    teleportInput.TextColor3 = Color3.fromRGB(255, 255, 255)
+    teleportInput.Font = Enum.Font.Gotham
+    teleportInput.TextSize = 12
+    teleportInput.Parent = teleportFrame
+    Instance.new("UICorner", teleportInput).CornerRadius = UDim.new(0, 4)
+    local teleportButton = Instance.new("TextButton")
+    teleportButton.Size = UDim2.new(0, 60, 0, 25)
+    teleportButton.Position = UDim2.new(0.75, 0, 0, 22)
+    teleportButton.BackgroundColor3 = Color3.fromRGB(0, 180, 80)
+    teleportButton.Text = "Go"
+    teleportButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    teleportButton.Font = Enum.Font.GothamBold
+    teleportButton.TextSize = 12
+    teleportButton.Parent = teleportFrame
+    Instance.new("UICorner", teleportButton).CornerRadius = UDim.new(0, 4)
+    teleportButton.MouseButton1Click:Connect(function()
+        local targetName = teleportInput.Text
         local target = Players:FindFirstChild(targetName)
         if target and target.Character and target.Character:FindFirstChild("HumanoidRootPart") then
             LocalPlayer.Character:SetPrimaryPartCFrame(target.Character.HumanoidRootPart.CFrame)
         end
     end)
 
+    -- FOV Circle (Drawing)
     if Drawing then
         fovCircle = Drawing.new("Circle")
         fovCircle.Thickness = 2
@@ -777,15 +967,15 @@ local function createUI()
     end
 end
 
--- Logo
-function createLogoButton(gui, main)
+-- Logo button (appears when minimized)
+function createLogoButton(gui, mainWindow)
     if logoButton then return end
     local logoGui = Instance.new("ScreenGui")
     logoGui.DisplayOrder = 99
     logoGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
     logoButton = Instance.new("TextButton")
     logoButton.Size = UDim2.new(0, 45, 0, 45)
-    logoButton.Position = UDim2.new(0, main.AbsolutePosition.X + main.AbsoluteSize.X/2 - 22.5, 0, main.AbsolutePosition.Y - 30)
+    logoButton.Position = UDim2.new(0, mainWindow.AbsolutePosition.X + mainWindow.AbsoluteSize.X / 2 - 22.5, 0, mainWindow.AbsolutePosition.Y - 30)
     logoButton.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
     logoButton.BorderSizePixel = 0
     logoButton.Text = "🥔"
@@ -809,7 +999,7 @@ function createLogoButton(gui, main)
                     isDragging = false
                     if not moved then
                         guiHidden = false
-                        main.Visible = true
+                        mainWindow.Visible = true
                         logoGui:Destroy()
                         logoButton = nil
                     end
@@ -822,20 +1012,24 @@ function createLogoButton(gui, main)
             local delta = input.Position - dragStartPos
             if delta.Magnitude > 5 then moved = true end
             if moved then
-                logoButton.Position = UDim2.new(logoStartPos.X.Scale, logoStartPos.X.Offset + delta.X, logoStartPos.Y.Scale, logoStartPos.Y.Offset + delta.Y)
+                logoButton.Position = UDim2.new(
+                    logoStartPos.X.Scale, logoStartPos.X.Offset + delta.X,
+                    logoStartPos.Y.Scale, logoStartPos.Y.Offset + delta.Y
+                )
             end
         end
     end)
 end
 
 -- ================== FLY & NOCLIP ==================
-local flyConnection, noclipConnection
+local flyConnection = nil
+local noclipConnection = nil
 
 function startFly()
-    local char = LocalPlayer.Character
-    if not char then return end
-    local humanoid = char:FindFirstChild("Humanoid")
-    local rootPart = char:FindFirstChild("HumanoidRootPart")
+    local character = LocalPlayer.Character
+    if not character then return end
+    local humanoid = character:FindFirstChild("Humanoid")
+    local rootPart = character:FindFirstChild("HumanoidRootPart")
     if not humanoid or not rootPart then return end
     humanoid.PlatformStand = true
     local bodyGyro = Instance.new("BodyGyro")
@@ -849,13 +1043,13 @@ function startFly()
     bodyVelocity.Parent = rootPart
     flyConnection = RunService.Heartbeat:Connect(function()
         if not config.player.fly then return end
-        local moveDirection = Vector3.new(0,0,0)
+        local moveDirection = Vector3.new(0, 0, 0)
         if UserInputService:IsKeyDown(Enum.KeyCode.W) then moveDirection = moveDirection + Camera.CFrame.LookVector end
         if UserInputService:IsKeyDown(Enum.KeyCode.S) then moveDirection = moveDirection - Camera.CFrame.LookVector end
         if UserInputService:IsKeyDown(Enum.KeyCode.A) then moveDirection = moveDirection - Camera.CFrame.RightVector end
         if UserInputService:IsKeyDown(Enum.KeyCode.D) then moveDirection = moveDirection + Camera.CFrame.RightVector end
-        if UserInputService:IsKeyDown(Enum.KeyCode.Space) then moveDirection = moveDirection + Vector3.new(0,1,0) end
-        if UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) then moveDirection = moveDirection - Vector3.new(0,1,0) end
+        if UserInputService:IsKeyDown(Enum.KeyCode.Space) then moveDirection = moveDirection + Vector3.new(0, 1, 0) end
+        if UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) then moveDirection = moveDirection - Vector3.new(0, 1, 0) end
         bodyVelocity.Velocity = moveDirection.Unit * config.player.flySpeed
         bodyGyro.CFrame = Camera.CFrame
     end)
@@ -863,29 +1057,29 @@ end
 
 function stopFly()
     if flyConnection then flyConnection:Disconnect(); flyConnection = nil end
-    local char = LocalPlayer.Character
-    if char then
-        local rootPart = char:FindFirstChild("HumanoidRootPart")
+    local character = LocalPlayer.Character
+    if character then
+        local rootPart = character:FindFirstChild("HumanoidRootPart")
         if rootPart then
             rootPart:FindFirstChild("BodyGyro"):Destroy()
             rootPart:FindFirstChild("BodyVelocity"):Destroy()
         end
-        local humanoid = char:FindFirstChild("Humanoid")
+        local humanoid = character:FindFirstChild("Humanoid")
         if humanoid then humanoid.PlatformStand = false end
     end
 end
 
 function startNoclip()
-    local char = LocalPlayer.Character
-    if not char then return end
-    local rootPart = char:FindFirstChild("HumanoidRootPart")
+    local character = LocalPlayer.Character
+    if not character then return end
+    local rootPart = character:FindFirstChild("HumanoidRootPart")
     if not rootPart then return end
     local bodyForce = Instance.new("BodyForce")
     bodyForce.Force = Vector3.new(0, workspace.Gravity * rootPart.AssemblyMass, 0)
     bodyForce.Parent = rootPart
     noclipConnection = RunService.Heartbeat:Connect(function()
         if not config.player.noclip then return end
-        for _, part in pairs(char:GetChildren()) do
+        for _, part in pairs(character:GetChildren()) do
             if part:IsA("BasePart") then part.CanCollide = false end
         end
     end)
@@ -893,14 +1087,14 @@ end
 
 function stopNoclip()
     if noclipConnection then noclipConnection:Disconnect(); noclipConnection = nil end
-    local char = LocalPlayer.Character
-    if char then
-        local rootPart = char:FindFirstChild("HumanoidRootPart")
+    local character = LocalPlayer.Character
+    if character then
+        local rootPart = character:FindFirstChild("HumanoidRootPart")
         if rootPart then
-            local bf = rootPart:FindFirstChild("BodyForce")
-            if bf then bf:Destroy() end
+            local bodyForce = rootPart:FindFirstChild("BodyForce")
+            if bodyForce then bodyForce:Destroy() end
         end
-        for _, part in pairs(char:GetChildren()) do
+        for _, part in pairs(character:GetChildren()) do
             if part:IsA("BasePart") then part.CanCollide = true end
         end
     end
@@ -913,16 +1107,11 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
         if guiHidden then
             guiHidden = false
             mainFrame.Visible = true
-            if logoButton then
-                logoButton.Parent:Destroy()
-                logoButton = nil
-            end
+            if logoButton then logoButton.Parent:Destroy(); logoButton = nil end
         else
             guiHidden = true
             mainFrame.Visible = false
-            if not logoButton then
-                createLogoButton(mainFrame.Parent, mainFrame)
-            end
+            if not logoButton then createLogoButton(mainFrame.Parent, mainFrame) end
         end
     end
 end)
@@ -932,23 +1121,17 @@ RunService.Heartbeat:Connect(function()
     if fovCircle then
         fovCircle.Visible = config.aimbot.enabled
         fovCircle.Radius = config.aimbot.fov
-        fovCircle.Position = Vector2.new(Camera.ViewportSize.X/2, Camera.ViewportSize.Y/2)
+        fovCircle.Position = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
     end
 
     if not config.aimbot.enabled then return end
-
-    if config.aimbot.mouseAim and not UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) then
-        return
-    end
+    if config.aimbot.mouseAim and not UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) then return end
 
     local target = findClosestPlayerToCursor(config.aimbot.fov)
     if not target then return end
-    local char = getCharacter(target)
-    if not char then return end
-    local aimPart = char:FindFirstChild(config.aimbot.aimPart)
-    if not aimPart then
-        aimPart = char:FindFirstChild("Head") or char:FindFirstChild("Torso") or char:FindFirstChild("HumanoidRootPart")
-    end
+    local character = getCharacter(target)
+    if not character then return end
+    local aimPart = character:FindFirstChild(config.aimbot.aimPart) or character:FindFirstChild("Head") or character:FindFirstChild("Torso") or character:FindFirstChild("HumanoidRootPart")
     if not aimPart then return end
 
     if config.aimbot.mouseAim then
@@ -964,12 +1147,12 @@ RunService.Heartbeat:Connect(function()
     end
 end)
 
--- ================== ESP RENDER ==================
+-- ================== ESP RENDER LOOP ==================
 RunService.RenderStepped:Connect(drawESP)
 
 -- ================== PLAYER INIT ==================
-LocalPlayer.CharacterAdded:Connect(function(char)
-    local humanoid = char:WaitForChild("Humanoid")
+LocalPlayer.CharacterAdded:Connect(function(character)
+    local humanoid = character:WaitForChild("Humanoid")
     humanoid.WalkSpeed = config.player.walkspeed
     humanoid.JumpPower = config.player.jumppower
     if config.player.fly then stopFly(); startFly() end
